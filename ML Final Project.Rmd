@@ -1,0 +1,205 @@
+---
+title: "Final Project ML"
+author: "O. Paz"
+date: "29-11-2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(caret)
+library(tidyverse)
+library(randomForest)
+```
+
+## Background information:
+
+This report is meant to fulfill the final project of Coursera's Practical Machine learning course. We are asked to study and make predictions of the variable "classe", part of the data sets shown below, based on all predictors that one deems fit. 
+
+The setting of the activity where the data come from is as follows:
+   Six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E).
+   The event was run such that Class "A" corresponded to "correct way" and the rest were just 4 different ways of doing it wrong. All data were collected from movement detector devices installed on the six individuals. Hence, the task is to come up with a ML model to predict the outcome from the testing set.
+
+Read more: http:/groupware.les.inf.puc-rio.br/har#ixzz4Tjuy9Csb
+
+ Training data: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+ 
+Testing Data: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+
+## Exploratory Analysis:
+
+First off the data were dowloaded, read.csv seemed appropriate, dropping the first column (redundant afterwards):
+
+```{r getting data, include=TRUE}
+training <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv")
+training<- training[,-1]
+
+testing <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv")
+testing <- testing[,-1]
+```
+
+
+A first glimpse to the structure and content of the data showed quite a few variables with "NA", in a percentage that rendered them useless:
+
+```{r exp 1, include=TRUE}
+table(colSums(is.na(training)))
+```
+
+Therefore, there are 67 variables with exactly 19.216 NAs each, which is about 98% of all the values, hence it's safe to assume that they will not influence our outcome and can be retrieved:
+
+```{r exp 2, include=TRUE}
+index <- colSums(is.na(training))!=0
+training_red <- training %>%  select_if(!index)
+```
+
+Now we are left with 92 variables, but there are also quite a few with blanks "" in  great number:
+```{r exp 3, include=TRUE}
+table(colSums(training_red==""))
+```
+
+Almost 98% blanks as well, so I better take them out, and be left with 59 variables:
+```{r exp 4, include=TRUE}
+index2 <- colSums(training_red=="")!=0
+training_red2 <- training_red %>%  select_if(!index2)
+```
+I will do the same for testing set, all at once now:
+
+```{r exp 5, include=TRUE}
+indext <- colSums(is.na(testing))!=0|colSums(testing=="")!=0
+testing_red <- testing %>%  select_if(!indext)
+```
+
+Let's take a look at the participants and classes distributions in the reduced training set:
+
+```{r exp 6, include=TRUE}
+table(training_red2$user_name)
+table(training_red2$classe)
+```
+
+So, the participants activities were more or less evenly distributed and the most performed activity was "A" (correct). Hopefully the samples were taken so that they are normally  distributed, despite the natural constraints of the type of experiment.
+
+Finally, I will also remove 6 qualitative variables, that are not defined as outcome and are not contributing features, namely: "user_name","raw_timestamp_part_1",  "raw_timestamp_part_2" , "cvtd_timestamp"      
+ , "new_window" and "num_window".
+
+```{r exp 7, include=TRUE}
+training_red3 <- training_red2[,-c(1:6)]
+testing_red3 <- testing_red[,-c(1:6)]
+```
+
+I end up with a reduced data set now, to start the real work, and I don't have to impute any missing value, which is nice. The data frame is also deemed as "tidy", provided that each variable forms a column and each observation forms a row. The variable names are quite descriptive so I will not mess with them.
+
+## Pre-processing:
+
+Just to start stating the obvious, we are dealing with a supervised/classification model. I will adequate the data by transforming our outcome (classe) to factor and all others to numeric:
+```{r pre 1, include=TRUE}
+training_red3$classe <- factor(training_red3$classe)
+training_red3 <- training_red3 %>% 
+  mutate_at(vars(1:52), as.numeric)
+```
+
+Now is a good time to look for "colinearity", particularly in this set-up where we know before hand that all data come from 6 fix sources (individuals) and the the produced data themselves are produced by constrained events (movements). I will show only the first and last variable correlations and just first 6 variables, for space constraints:
+
+```{r pre 2, include=TRUE}
+Cor <- cor(training_red3[,-53])
+head(Cor)[,1:6]
+tail(Cor)[,1:6]
+```
+
+Not surprisingly, the total acceleration, for instance, is closely related to accelerations in y and z axis, although not so much with with x axis (my guess is that the up and down movements were recorded in y-z axis). In general though, there seem to be many non-linear relationships as to make a good prediction model, once we narrow down the predictors.
+
+To make it more precise:
+
+```{r pre 3, include=TRUE}
+sum(abs(Cor[upper.tri(Cor)]) > .75)
+sum(abs(Cor[upper.tri(Cor)]) > .90)
+sum(abs(Cor[upper.tri(Cor)]) > .95)
+summary(Cor[upper.tri(Cor)])
+```
+
+There are 31 features with correlation > 75% , 11 with correlation > 90% and 5 with correlation > 95%. Also the short summary shows the distribution.
+
+Let's look at the graphs, taking only a few variables of different nature (roll, pitch,yaw, gyroscope, magnet, acceleration):
+
+```{r pre 4, include=TRUE}
+featurePlot(x = training_red3[1:1000,c(1:3,18,37,50)], y = training_red3$classe, plot = "pairs")
+```
+
+I know it's messy but it just goes to show that there are clear patterns among the features.
+
+We can set up a cut-off value for the correlation of 0.75 and subset our data before continuing on (will also apply on testing set):
+
+```{r pre 5, include=TRUE}
+indexCor <- findCorrelation(Cor, cutoff = .75)
+training_red3 <- training_red3[,-indexCor]
+testing_red3 <- testing_red3[,-indexCor]
+Cor2 <- cor(training_red3[,-32])
+summary(Cor2[upper.tri(Cor2)])
+```
+
+Now the linearity was reduced substantially.
+
+There are other things one can do to prep-up the data before passing to choose the algorithm but I will use random forest, which, just to name one feature, there is no need for cross-validation or a separate test set to get an unbiased estimate of the test set error because it's implicit in the process by bootstraping within every tree (other advantages in the next section).
+
+## Modeling and predicting:
+
+There are many reasons to choose random forest for this classification problem. Basically, it's tree-based and, as an ensemble algorithm, it puts together the known advantages of other algorithms as well with little to no tuning and minimum pre-processing as most of it is implicit in the process.
+
+Here's an extract from "Random Forests, by Leo Breiman and Adele Cutler" that describes other very interesting features:
+
+- It is unexcelled in accuracy among current algorithms.
+- It runs efficiently on large data bases.
+- It can handle thousands of input variables without variable deletion.
+- It gives estimates of what variables are important in the classification.
+- It generates an internal unbiased estimate of the generalization error as the forest building progresses.
+- It has an effective method for estimating missing data and maintains accuracy when a large proportion of the data are missing.
+- It has methods for balancing error in class population unbalanced data sets.
+- Generated forests can be saved for future use on other data.
+- Prototypes are computed that give information about the relation between the variables and the classification.
+- It computes proximities between pairs of cases that can be used in clustering, locating outliers, or (by scaling) give interesting views of the data.
+- The capabilities of the above can be extended to unlabeled data, leading to unsupervised clustering, data views and outlier detection.
+- It offers an experimental method for detecting variable interactions.
+
+Now the fun part, training and predicting:
+
+```{r fit 1, include=TRUE}
+fit1 <- randomForest(classe~., data = training_red3, type="class")
+fit1
+```
+
+#### It shows in the summary an out-of-bag error of 0.44% (very very good) and the confusion matrix shows very few Type I or II errors (excellent). The algorith used 500 trees and each node was split into 5, according to the information.
+
+It's always interesting to see the importance of the variables:
+        
+```{r fit 2, include=TRUE}
+par(mar = rep(2,4))
+varImpPlot(fit1)
+importance(fit1)
+```       
+
+Let's see the performance of the trees compared to errors:
+
+```{r fit 3, include=TRUE}
+par(mar= c(3.8,3.8,1,1))
+plot(fit1)
+``` 
+
+Looks like we could have reached errors close to zero with far less trees, random forest is very potent!
+
+
+Finally, let's validate our model with the testing set by making a prediction:
+```{r fit 4, include=TRUE}
+pred1 <- predict(fit1, newdata=testing_red3, type="class")
+pred1
+``` 
+
+#### The prediction "pred1" turned aout to be 100% accurate according to the quiz 4 of the course.
+
+Finally, it would have been interesting to run another confusion matrix to compare results of the prediction against the testing set, but we were not given those classes (it would have been cheating) and I didn't take any additional testing set (maybe I should have), but the result of the quiz and the OOB parameter (< 1%) show the accuracy of the model.
+
+## Final words:
+
+I acknowledge that maybe I didn't have to do so much pre-processing (for instance, narrow down the predictors so much) and even some of the data cleaning because many of those things are taken care of by the random forest algorithm itself, but since this is an academic exercise I wanted to take it step by step and show the line of thought of some general methodology to approach these interesting problems.
+
+#####                 THE END :-)
+
